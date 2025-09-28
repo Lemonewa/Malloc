@@ -1,0 +1,439 @@
+// najwazniejsze szczegoly implementacyjne
+// puste bloki beda siedziec w kubelkach o odpowiednich wielkosciach
+// kazdy kubelek bedzie lista wskaznikow
+// pusty blok musi przechowywac na poczatku:
+// rozmiar (taki rzeczywisty (z paddingiem), czyli wielokrotnosc 16B)
+// bit stanu (1 dla zajetych); mozna go trzymac w najmniej znaczacym bicie
+// rozmiaru wskaznik na poprzednika (moze byc 4B ale ja zrobie najpierw 8B)
+// wskaznik na nastepnika (to samo)
+// pusty blok musi przechowywac na koncu:
+// rozmiar (taki z paddingiem, czyli wielokrotnosc 16B)
+// bit stanu (1 dla zajetych); mozna go trzymac w najmniej znaczacym bicie
+// rozmiaru pelny blok musi przechowywac na poczatku: rozmiar (taki z
+// paddingiem, czyli wielokrotnosc 16B) bit stanu (1 dla zajetych); mozna go
+// trzymac w najmniej znaczacym bicie rozmiaru pelny blok musi przechowywac na
+// koncu: bit stanu (1 dla zajetych); mozna go trzymac w najmniej znaczacym
+// bicie rozmiaru jak widac pusty blok ma 4+8+8 bajtow na poczatku i 4 na koncu
+// w praktyce taki blok ma wiec rozmiar zaczynajacy sie na bajcie 12 mod 16
+// z kolei pelny blok ma 4 bajty na poczatku i 1 na koncu
+// czyli z tego 24 + zawartosc wlasciwa zostanie nam realnie zawartosc wlasciwa
+// + 19 do przydzielenia
+
+static const int64_t sz = 0x800000000;
+
+// ponizej znajduja sie funkcje do oblsugi wskaznikow
+// mam wrazenie ze dzieki nim reszta kodu jest bardziej czytelna
+
+// funkcja do wczytywania int32_t pod dany wskaznik
+static inline void wczytajINT32(void *adres, int32_t wartosc) {
+  int32_t *temp = adres;
+  *temp = wartosc;
+}
+
+// funkcja do wczytywania int32_t pod dany wskaznik, ale przyjmuje argument
+// int64_t
+static inline void wczytajINT64(void *adres, int64_t wartosc) {
+  int32_t *temp = adres;
+  *temp = wartosc & 0xffffffff;
+}
+
+// funkcja do odczytywania int32_t z danego wskaznika
+static inline int32_t przeczytajINT32(void *adres) {
+  int32_t temp = *((int32_t *)(adres));
+  return temp;
+}
+
+// kubelki beda +- kolejnymi potegami dwojki * 2^4 (dokladnie 32 + 16*(2^i-1))
+// <32,47>, <48,79>, <80,143>, <144,271>, ... , <16400,INF>
+// jak widac jedenascie pierwszych tylko biore
+// ponizsza funkcja bierze argument z malloca i szuka dla niego kubelka od
+// ktorego zaczac szukanie
+static inline int32_t kubelek(int32_t a) {
+  if (a < 48) {
+    return 0;
+  } else if (a < 80) {
+    return 1;
+  } else if (a < 144) {
+    return 2;
+  } else if (a < 272) {
+    return 3;
+  } else if (a < 528) {
+    return 4;
+  } else if (a < 1040) {
+    return 5;
+  } else if (a < 2064) {
+    return 6;
+  } else if (a < 4112) {
+    return 7;
+  } else if (a < 8208) {
+    return 8;
+  } else if (a < 16400) {
+    return 9;
+  } else {
+    return 10;
+  }
+}
+
+// co w koncu z tymi glupimi rozmiarami?!
+// dostajemy request malloc n
+// wpiszemy go pod adres A przystajacy do 0 mod 16
+// jak n przystaje do 12,13,14 lub 15 mod 16 to ostatni bajt pojdzie na
+// A+n+15,A+n+14,A+n+13,A+n+12 jak n przystaje do 0,1,...,11 mod 16 to ostatni
+// bajt pojdzie na A+n+11,A+n+10,...,A+n+0 czyli zajety blok ma realnie
+// n+5+(11-n%16)%16 rozmiaru i tyle wpiszemy zwracamy A+4 miejsce w pamieci free
+// bloki beda miec rozmiar ten swoj czyli 24 + na serio one tez sie maja
+// zaczynac na bajtach 12 mod 16 na A siedzi rozmiar, na A+4 siedzi poprzednik,
+// na A+12 siedzi nastepnik na A+4 juz sie zaczyna normalne miejsce do
+// przydzialu (warto wiedziec) jak n przystaje do 0,1,...,8 mod 16 to rozmiar
+// pojdzie na A+n+8,A+n+7,...,A+n+0 jak n przystaje do 9,...,15 mod 16 to
+// rozmiar pojdzie na A+n+15,A+n+14,...,A+n+9 czyli pusty blok ma realnie
+// n+24+(8-n%16)%16 rozmiaru i tyle wpiszemy jeszcze skoro chcemy zeby free
+// block byl minimalnie 25 bajtow to trzeba zrobic tak: jak wrzucamy pelny blok
+// w luke rozmiaru k to wykorzystamy z niej to wyliczone n+5+(11-n%16)%16 bajtow
+// teraz jesli k - potworek (to zawsze jest 0 mod 16) jest rowne 16 to:
+// do rozmiaru zajetego bloku dopiszemy to 16 jeszcze (trudno, zmarnuje sie)
+// jesli jest wiecej (x>=32) to mozna stworzyc nowy blok
+// trzeba go dorzucic do listy z kubelkiem odpowiednim dla x
+// finalnie:
+// dostaje request na n
+// szukam kubelka rozmiaru n+5+(11-n%16)%16
+// zwracam wskaznik A+4
+// pozostaly rozmiar to jest rozmiar kubelka (postaci x+24+(8-x%16)%16-ten moj
+// rozmiar) kubelek jest tak napisany, ze sie bedzie szukal dobrze dla argumentu
+// n
+
+// funkcja ustawia metadane pustego bloku w pamieci
+static inline void ustaw_pusty(void *adres, int32_t rozmiar, void *poprzednik,
+                               void *nastepnik) {
+  wczytajINT32(adres, rozmiar);
+  wczytajINT64(adres + 4, (int64_t)(poprzednik));
+  wczytajINT64(adres + 8, (int64_t)(nastepnik));
+  wczytajINT32(adres + rozmiar - 4, rozmiar);
+}
+
+// funkcja ustawia metadane pelnego bloku w pamieci
+static inline void ustaw_pelny(void *adres, int32_t rozmiar) {
+  wczytajINT32(adres, rozmiar + 1);
+  char *temp = (char *)(adres) + rozmiar - 1;
+  *temp = 0x1;
+}
+
+// czy ja to w koncu gdzies napisalam?
+// free blocki sa dolaczane na poczatek (!) kubelkow
+// startowy informacyjny kubelek to ultranastepnik, zawsze pierwszy, wskazuje na
+// poprzednika albo 0 tzn bo odblokowaniu blocku ten startowy informacyjny
+// kubelek zacznie wskazywac na nowego goscia zatem nowy gosc ma nastepnika jako
+// kubelek startowy i ma poprzednika - tego, ktory byl pierwszy dotychczas albo
+// 0 jak kubelek byl pusty
+
+// funkcja znajduje pierwszy wolny blok o wystarczajacym rozmiarze i zwraca jego
+// adres jesli takowego nie ma to zwraca NULL
+static void *przeszukaj(int32_t indeks, int32_t rozmiar) {
+  void *p = (void *)(intptr_t)(przeczytajINT32(mem_heap_lo() + 4 * indeks));
+  if ((int64_t)(p) == (int64_t)(0)) {
+    if (indeks == 10) {
+      return NULL;
+    }
+    return przeszukaj(indeks + 1, rozmiar);
+  }
+  p += sz;
+  void *best = NULL;
+  int licz = 0, ile = 1000000005;
+  while ((int64_t)(p) != sz) {
+    int32_t z = przeczytajINT32(p);
+    if (z >= rozmiar && licz < 9 && z - rozmiar < ile) {
+      if (z == rozmiar) {
+        return p;
+      }
+      ile = z - rozmiar;
+      best = p;
+      licz++;
+    }
+    p = (void *)(intptr_t)(przeczytajINT32(p + 4));
+    p += sz;
+  }
+  if (best != NULL) {
+    return best;
+  }
+  if (indeks == 10) {
+    return NULL;
+  }
+  return przeszukaj(indeks + 1, rozmiar);
+}
+
+// funkcja usuwa ("wypina") pusty blok z listy (kubelka)
+static inline void usun(void *poprzednik, void *nastepnik) {
+  nastepnik += sz;
+  if ((int64_t)(poprzednik) == (int64_t)(0)) {
+    if (nastepnik < mem_heap_lo() + 60) {
+      wczytajINT64(nastepnik, (int64_t)(0));
+    } else {
+      wczytajINT64(nastepnik + 4, (int64_t)(0));
+    }
+  } else {
+    poprzednik += sz;
+    if (nastepnik < mem_heap_lo() + 60) {
+      wczytajINT64(nastepnik, (int64_t)(poprzednik));
+      wczytajINT64(poprzednik + 8, (int64_t)(nastepnik));
+    } else {
+      wczytajINT64(nastepnik + 4, (int64_t)(poprzednik));
+      wczytajINT64(poprzednik + 8, (int64_t)(nastepnik));
+    }
+  }
+}
+
+// funkcja dodaje ("wpina") pusty blok do listy (kubelka)
+static inline void dodaj(void *gdzie, int32_t rozmiar) {
+  int32_t k = kubelek(rozmiar);
+  void *r = (void *)(intptr_t)(przeczytajINT32(mem_heap_lo() + 4 * k));
+  if ((int64_t)(r) == (int64_t)(0)) {
+    ustaw_pusty(gdzie, rozmiar, (void *)(intptr_t)(0), mem_heap_lo() + 4 * k);
+    wczytajINT64(mem_heap_lo() + 4 * k, (int64_t)(gdzie));
+  } else {
+    r += sz;
+    ustaw_pusty(gdzie, rozmiar, r, mem_heap_lo() + 4 * k);
+    wczytajINT64(mem_heap_lo() + 4 * k, (int64_t)(gdzie));
+    wczytajINT64(r + 8, (int64_t)(gdzie));
+  }
+}
+
+/*static void debugg()
+{
+  for (int j=0;j<11;j++)
+  {
+    void *pom=mem_heap_lo()+4*j;
+    int64_t popr=przeczytajINT32(pom);
+    int64_t czy=0;
+    int64_t nast;
+    if (popr==0)
+    {
+      printf("kubelek %d jest pusty\n",j);
+    }
+    else
+    {
+      printf("%ld %p\n",popr,(void *)(intptr_t)(popr));
+      popr+=sz;
+      printf("%ld %p\n",popr,(void *)(intptr_t)(popr));
+      printf("%ld %p %p %ld\n",popr+(int64_t)(mem_heap_lo()),mem_heap_lo(),(void
+*)(intptr_t)(popr+mem_heap_lo()),(int64_t)(mem_heap_lo())); printf("kubelek %d:
+%ld, rozmiar: %d\n",j,popr+(int64_t)(mem_heap_lo()),przeczytajINT32((void
+*)(intptr_t)(popr))); while (popr!=0)
+      {
+        czy=popr;
+        printf("ROZM: %d, ",przeczytajINT32((void *)(intptr_t)(popr)));
+        nast=przeczytajINT32((void *)(intptr_t)(popr)+8);
+        nast+=sz;
+        popr=przeczytajINT32((void *)(intptr_t)(popr)+4);
+        if (popr==0)
+        {
+          printf("POPR: %ld, NAST: %ld\n",popr,nast-(int64_t)(mem_heap_lo()));
+        }
+        else
+        {
+          popr+=sz;
+          printf("POPR: %ld, NAST:
+%ld\n",popr-(int64_t)(mem_heap_lo()),nast-(int64_t)(mem_heap_lo()));
+        }
+        if (popr==nast||czy==popr)
+        {
+          break;
+        }
+      }
+    }
+  }
+}*/
+
+// przyda sie:
+// mem_heapsize(void) zwraca rozmiar sterty w bajtach
+// *mem_heap_lo(void) zwraca adres pierwszego bajtu należącego do sterty
+// *mem_heap_hi(void) zwraca adres ostatniego bajtu należącego do sterty
+// *mem_sbrk(long incr) zwieksza sterte o incr bajtow i zwraca wskaznik na
+// poczatek nowego obszaru
+
+// init jedynie inicjuje odpowiednio moje 11 kubelkow oraz kolejne 4B
+int mm_init(void) {
+  mem_sbrk((long)(60));
+  for (int j = 0; j < 11; j++) {
+    wczytajINT64(mem_heap_lo() + 4 * j, (int64_t)(0));
+  }
+  wczytajINT32(mem_heap_lo() + 56, 0xffffffff);
+  return 0;
+}
+
+// malloc jest podzielony na takie glowne przypadki:
+// jesli nie znaleziono wystarczajaco miejsca przesun koniec sterty
+// jesli znaleziono wystarczajaco miejsca "na styk" zwroc je
+// jesli tak jak wyzej, ale miejsca jest nadmiar to ponadto dodaj nadmiar do
+// listy pustych blokow
+void *malloc(size_t size) {
+  int32_t n = size + 5 + (11 - size % 16) % 16;
+  int32_t kub = kubelek(n);
+  if (n == 16 && kub == 0) {
+    n += 16;
+  } else if (n == 16 && kub == 1) {
+    n += 16;
+    void *nowe = mem_sbrk((long)(n));
+    ustaw_pelny(nowe, n);
+    return nowe + 4;
+  }
+  void *gdzie = przeszukaj(kub, n);
+  if (gdzie == NULL) {
+    void *nowe = mem_sbrk((long)(n));
+    ustaw_pelny(nowe, n);
+    return nowe + 4;
+  }
+  int32_t rozm = przeczytajINT32(gdzie);
+  void *popr = (void *)(intptr_t)(przeczytajINT32(gdzie + 4));
+  void *nast = (void *)(intptr_t)(przeczytajINT32(gdzie + 8));
+  usun(popr, nast);
+  if (rozm - n >= 32) {
+    dodaj(gdzie + n, rozm - n);
+  } else if (rozm - n == 16) {
+    n += 16;
+  }
+  ustaw_pelny(gdzie, n);
+  return gdzie + 4;
+}
+
+// free jest podzielony na takie glowne przypadki:
+// jesli nie ma fizycznie ktoregokolwiek z sasiadow (konce sterty) to obsluz
+// specjalnie jesli sasiedzi sa, ale zajeci to po prostu zwolnij jesli jest
+// wolny tylko lewy sasiad to podlacz sie do niego jesli jest wolny tylko prawy
+// sasiad to podlacz go do siebie jesli obaj sasiedzi sa wolni to polacz sie z
+// ktorymkolwiek z nim, a potem taki zlepek polacz z pozostalym sasiadem
+void free(void *ptr) {
+  if (ptr != NULL) {
+    ptr = ptr - 4;
+    int32_t rozm = przeczytajINT32(ptr) - 1;
+    if (((int64_t)(ptr) == (int64_t)(mem_heap_lo()) + (int64_t)(60)) &&
+        ((int64_t)(ptr) + (int64_t)(rozm - 1) == (int64_t)(mem_heap_hi()))) {
+      dodaj(ptr, rozm);
+    } else if ((int64_t)(ptr) == (int64_t)(mem_heap_lo()) + (int64_t)(60)) {
+      int32_t prawy = przeczytajINT32(ptr + rozm);
+      prawy = (prawy & 0x00000001);
+      if (prawy == 1) {
+        dodaj(ptr, rozm);
+      } else {
+        int32_t rozmp = przeczytajINT32(ptr + rozm);
+        void *popr = (void *)(intptr_t)(przeczytajINT32(ptr + rozm + 4));
+        void *nast = (void *)(intptr_t)(przeczytajINT32(ptr + rozm + 8));
+        usun(popr, nast);
+        rozm += rozmp;
+        dodaj(ptr, rozm);
+      }
+    } else if ((int64_t)(ptr) + (int64_t)(rozm - 1) ==
+               (int64_t)(mem_heap_hi())) {
+      int32_t lewy = (int32_t)(*((char *)(ptr - 1)));
+      lewy = (lewy & 0x00000001);
+      if (lewy == 1) {
+        dodaj(ptr, rozm);
+      } else {
+        int32_t rozml = przeczytajINT32(ptr - 4);
+        void *popr = (void *)(intptr_t)(przeczytajINT32(ptr - rozml + 4));
+        void *nast = (void *)(intptr_t)(przeczytajINT32(ptr - rozml + 8));
+        usun(popr, nast);
+        dodaj(ptr - rozml, rozm + rozml);
+      }
+    } else {
+      int32_t lewy = (int32_t)(*((char *)(ptr - 1)));
+      lewy = (lewy & 0x00000001);
+      int32_t prawy = przeczytajINT32(ptr + rozm);
+      prawy = (prawy & 0x00000001);
+      if (lewy == 1 && prawy == 1) {
+        dodaj(ptr, rozm);
+      } else if (lewy == 1 && prawy == 0) {
+        int32_t rozmp = przeczytajINT32(ptr + rozm);
+        void *popr = (void *)(intptr_t)(przeczytajINT32(ptr + rozm + 4));
+        void *nast = (void *)(intptr_t)(przeczytajINT32(ptr + rozm + 8));
+        usun(popr, nast);
+        rozm += rozmp;
+        dodaj(ptr, rozm);
+      } else if (lewy == 0 && prawy == 1) {
+        int32_t rozml = przeczytajINT32(ptr - 4);
+        void *popr = (void *)(intptr_t)(przeczytajINT32(ptr - rozml + 4));
+        void *nast = (void *)(intptr_t)(przeczytajINT32(ptr - rozml + 8));
+        usun(popr, nast);
+        dodaj(ptr - rozml, rozm + rozml);
+      } else {
+        int32_t rozml = przeczytajINT32(ptr - 4);
+        int32_t rozmp = przeczytajINT32(ptr + rozm);
+        void *poprl = (void *)(intptr_t)(przeczytajINT32(ptr - rozml + 4));
+        void *nastl = (void *)(intptr_t)(przeczytajINT32(ptr - rozml + 8));
+        usun(poprl, nastl);
+        void *poprp = (void *)(intptr_t)(przeczytajINT32(ptr + rozm + 4));
+        void *nastp = (void *)(intptr_t)(przeczytajINT32(ptr + rozm + 8));
+        usun(poprp, nastp);
+        dodaj(ptr - rozml, rozml + rozm + rozmp);
+      }
+    }
+    // debugg();
+  }
+}
+
+// realloc jest podzielony na takie glowne przypadki:
+// jak wartosc argumentu size to 0, wykonaj free
+// jak wartosc argumentu old_ptr to NULL, wykonaj malloc
+// jak zmniejszamy rozmiar bloku o sensowne minimum to dodaj roznice do pustych
+// blokow jak zwiekszamy, ale jestesmy na koncu sterty to zwiekszamy sterte o
+// roznice jak zwiekszamy, ale prawy sasiad jest wolny to probujemy sie z nim
+// polaczyc jak nie zachodzi nic z powyzszych robimy malloca i kopiujemy dane
+void *realloc(void *old_ptr, size_t size) {
+  if (size == 0) {
+    free(old_ptr);
+    return NULL;
+  }
+  if (!old_ptr) {
+    return malloc(size);
+  }
+  old_ptr = old_ptr - 4;
+  int32_t n = size + 5 + (11 - size % 16) % 16;
+  int32_t rozm = przeczytajINT32(old_ptr) - 1;
+  if (n <= rozm) {
+    if (n == 16) {
+      n += 16;
+    }
+    if (rozm - n >= 32) {
+      dodaj(old_ptr + n, rozm - n);
+      ustaw_pelny(old_ptr, n);
+      // debugg();
+      return old_ptr + 4;
+    }
+    return old_ptr + 4;
+  }
+  if ((old_ptr + rozm - 1) == mem_heap_hi()) {
+    mem_sbrk((long)(n - rozm));
+    ustaw_pelny(old_ptr, n);
+    return old_ptr + 4;
+  }
+  int32_t prawy = przeczytajINT32(old_ptr + rozm);
+  prawy = (prawy & 0x00000001);
+  int32_t rozmp = przeczytajINT32(old_ptr + rozm);
+  if (prawy == 0 && rozmp + rozm >= n) {
+    if (rozmp + rozm - n >= 32) {
+      usun((void *)(intptr_t)(przeczytajINT32(old_ptr + rozm + 4)),
+           (void *)(intptr_t)(przeczytajINT32(old_ptr + rozm + 8)));
+      dodaj(old_ptr + n, rozm + rozmp - n);
+      ustaw_pelny(old_ptr, n);
+      // debugg();
+      return old_ptr + 4;
+    }
+    if (rozmp + rozm - n == 16) {
+      n += 16;
+    }
+    usun((void *)(intptr_t)(przeczytajINT32(old_ptr + rozm + 4)),
+         (void *)(intptr_t)(przeczytajINT32(old_ptr + rozm + 8)));
+    ustaw_pelny(old_ptr, n);
+    // debugg();
+    return old_ptr + 4;
+  }
+  void *new_ptr = malloc(size);
+  size_t old_size;
+  if (n <= rozm) {
+    old_size = n;
+  } else {
+    old_size = rozm;
+  }
+  memcpy(new_ptr, old_ptr + 4, old_size - 5);
+  free(old_ptr + 4);
+  return new_ptr;
+}
