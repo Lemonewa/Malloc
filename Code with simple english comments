@@ -1,0 +1,328 @@
+// Main idea:
+// Free blocks will be stored in buckets (lists of pointers) of sizes corelated with powers of 2.
+// Beginning of free block will contain its real size (padding included), state bit,
+// pointer to the previous free block, pointer to the next free block.
+// Ending of free block will contain its real size (padding included) and state bit.
+// Beginning of occupied block will contain its real size (padding included) and state bit.
+// Ending of occupied block will contain its state bit.
+
+// Using these blackboxes:
+// mem_heapsize(void) - returns heap size in bytes.
+// *mem_heap_lo(void) - returns adress of first byte of the heap.
+// *mem_heap_hi(void) - returns adress of last byte of the heap.
+// *mem_sbrk(long incr) - increases heap by incr bytes and returns adress of its new beginning.
+
+static const int64_t sz = 0x800000000;
+
+// Some functions for handling pointers.
+
+// Loads int32_t to memory at given pointer.
+static inline void wczytajINT32(void *adres, int32_t wartosc) {
+  int32_t *temp = adres;
+  *temp = wartosc;
+}
+// Loads int32_t to memory at given pointer, but takes int64_t as an argument.
+static inline void wczytajINT64(void *adres, int64_t wartosc) {
+  int32_t *temp = adres;
+  *temp = wartosc & 0xffffffff;
+}
+// Reads value of int32_t from memory at given pointer.
+static inline int32_t przeczytajINT32(void *adres) {
+  int32_t temp = *((int32_t *)(adres));
+  return temp;
+}
+
+// Returns number of minimal bucket in which given number will fit.
+static inline int32_t kubelek(int32_t a) {
+  if (a < 48) {
+    return 0;
+  } else if (a < 80) {
+    return 1;
+  } else if (a < 144) {
+    return 2;
+  } else if (a < 272) {
+    return 3;
+  } else if (a < 528) {
+    return 4;
+  } else if (a < 1040) {
+    return 5;
+  } else if (a < 2064) {
+    return 6;
+  } else if (a < 4112) {
+    return 7;
+  } else if (a < 8208) {
+    return 8;
+  } else if (a < 16400) {
+    return 9;
+  } else {
+    return 10;
+  }
+}
+
+// Sets metadata of free block.
+static inline void ustaw_pusty(void *adres, int32_t rozmiar, void *poprzednik,
+                               void *nastepnik) {
+  wczytajINT32(adres, rozmiar);
+  wczytajINT64(adres + 4, (int64_t)(poprzednik));
+  wczytajINT64(adres + 8, (int64_t)(nastepnik));
+  wczytajINT32(adres + rozmiar - 4, rozmiar);
+}
+// Sets metadata of occupied block.
+static inline void ustaw_pelny(void *adres, int32_t rozmiar) {
+  wczytajINT32(adres, rozmiar + 1);
+  char *temp = (char *)(adres) + rozmiar - 1;
+  *temp = 0x1;
+}
+
+// Returns first big enough free block or NULL if such one does not exist. 
+static void *przeszukaj(int32_t indeks, int32_t rozmiar) {
+  void *p = (void *)(intptr_t)(przeczytajINT32(mem_heap_lo() + 4 * indeks));
+  if ((int64_t)(p) == (int64_t)(0)) {
+    if (indeks == 10) {
+      return NULL;
+    }
+    return przeszukaj(indeks + 1, rozmiar);
+  }
+  p += sz;
+  void *best = NULL;
+  int licz = 0, ile = 1000000005;
+  while ((int64_t)(p) != sz) {
+    int32_t z = przeczytajINT32(p);
+    if (z >= rozmiar && licz < 9 && z - rozmiar < ile) {
+      if (z == rozmiar) {
+        return p;
+      }
+      ile = z - rozmiar;
+      best = p;
+      licz++;
+    }
+    p = (void *)(intptr_t)(przeczytajINT32(p + 4));
+    p += sz;
+  }
+  if (best != NULL) {
+    return best;
+  }
+  if (indeks == 10) {
+    return NULL;
+  }
+  return przeszukaj(indeks + 1, rozmiar);
+}
+
+// Removes free block from its bucket.
+static inline void usun(void *poprzednik, void *nastepnik) {
+  nastepnik += sz;
+  if ((int64_t)(poprzednik) == (int64_t)(0)) {
+    if (nastepnik < mem_heap_lo() + 60) {
+      wczytajINT64(nastepnik, (int64_t)(0));
+    } else {
+      wczytajINT64(nastepnik + 4, (int64_t)(0));
+    }
+  } else {
+    poprzednik += sz;
+    if (nastepnik < mem_heap_lo() + 60) {
+      wczytajINT64(nastepnik, (int64_t)(poprzednik));
+      wczytajINT64(poprzednik + 8, (int64_t)(nastepnik));
+    } else {
+      wczytajINT64(nastepnik + 4, (int64_t)(poprzednik));
+      wczytajINT64(poprzednik + 8, (int64_t)(nastepnik));
+    }
+  }
+}
+
+// Adds free block to its bucket.
+static inline void dodaj(void *gdzie, int32_t rozmiar) {
+  int32_t k = kubelek(rozmiar);
+  void *r = (void *)(intptr_t)(przeczytajINT32(mem_heap_lo() + 4 * k));
+  if ((int64_t)(r) == (int64_t)(0)) {
+    ustaw_pusty(gdzie, rozmiar, (void *)(intptr_t)(0), mem_heap_lo() + 4 * k);
+    wczytajINT64(mem_heap_lo() + 4 * k, (int64_t)(gdzie));
+  } else {
+    r += sz;
+    ustaw_pusty(gdzie, rozmiar, r, mem_heap_lo() + 4 * k);
+    wczytajINT64(mem_heap_lo() + 4 * k, (int64_t)(gdzie));
+    wczytajINT64(r + 8, (int64_t)(gdzie));
+  }
+}
+
+// Initialization of buckets.
+int mm_init(void) {
+  mem_sbrk((long)(60));
+  for (int j = 0; j < 11; j++) {
+    wczytajINT64(mem_heap_lo() + 4 * j, (int64_t)(0));
+  }
+  wczytajINT32(mem_heap_lo() + 56, 0xffffffff);
+  return 0;
+}
+
+// Malloc is divided into 3 cases:
+// 1. If big enough free block was not found, increase heap size.
+// 2. Else if found free block is perfect by size, return it.
+// 3. Else if found free block is greater than necessary, return it and turn leftovers into a new free block.
+void *malloc(size_t size) {
+  int32_t n = size + 5 + (11 - size % 16) % 16;
+  int32_t kub = kubelek(n);
+  if (n == 16 && kub == 0) {
+    n += 16;
+  } else if (n == 16 && kub == 1) {
+    n += 16;
+    void *nowe = mem_sbrk((long)(n));
+    ustaw_pelny(nowe, n);
+    return nowe + 4;
+  }
+  void *gdzie = przeszukaj(kub, n);
+  if (gdzie == NULL) {
+    void *nowe = mem_sbrk((long)(n));
+    ustaw_pelny(nowe, n);
+    return nowe + 4;
+  }
+  int32_t rozm = przeczytajINT32(gdzie);
+  void *popr = (void *)(intptr_t)(przeczytajINT32(gdzie + 4));
+  void *nast = (void *)(intptr_t)(przeczytajINT32(gdzie + 8));
+  usun(popr, nast);
+  if (rozm - n >= 32) {
+    dodaj(gdzie + n, rozm - n);
+  } else if (rozm - n == 16) {
+    n += 16;
+  }
+  ustaw_pelny(gdzie, n);
+  return gdzie + 4;
+}
+
+// Free is divided into 5 cases:
+// 1. If at least one of free block neighbours does not exists (heap edges), handle it as a special case.
+// 2. Else if both neighbours are occupied, change block into free one without additional steps.
+// 3. Else if only left neighbour is free, join free block to it.
+// 4. Else if only right neighbour is free, join it to the free block.
+// 5. Else if both neighbours are free, merge them with free block in any order.
+void free(void *ptr) {
+  if (ptr != NULL) {
+    ptr = ptr - 4;
+    int32_t rozm = przeczytajINT32(ptr) - 1;
+    if (((int64_t)(ptr) == (int64_t)(mem_heap_lo()) + (int64_t)(60)) &&
+        ((int64_t)(ptr) + (int64_t)(rozm - 1) == (int64_t)(mem_heap_hi()))) {
+      dodaj(ptr, rozm);
+    } else if ((int64_t)(ptr) == (int64_t)(mem_heap_lo()) + (int64_t)(60)) {
+      int32_t prawy = przeczytajINT32(ptr + rozm);
+      prawy = (prawy & 0x00000001);
+      if (prawy == 1) {
+        dodaj(ptr, rozm);
+      } else {
+        int32_t rozmp = przeczytajINT32(ptr + rozm);
+        void *popr = (void *)(intptr_t)(przeczytajINT32(ptr + rozm + 4));
+        void *nast = (void *)(intptr_t)(przeczytajINT32(ptr + rozm + 8));
+        usun(popr, nast);
+        rozm += rozmp;
+        dodaj(ptr, rozm);
+      }
+    } else if ((int64_t)(ptr) + (int64_t)(rozm - 1) ==
+               (int64_t)(mem_heap_hi())) {
+      int32_t lewy = (int32_t)(*((char *)(ptr - 1)));
+      lewy = (lewy & 0x00000001);
+      if (lewy == 1) {
+        dodaj(ptr, rozm);
+      } else {
+        int32_t rozml = przeczytajINT32(ptr - 4);
+        void *popr = (void *)(intptr_t)(przeczytajINT32(ptr - rozml + 4));
+        void *nast = (void *)(intptr_t)(przeczytajINT32(ptr - rozml + 8));
+        usun(popr, nast);
+        dodaj(ptr - rozml, rozm + rozml);
+      }
+    } else {
+      int32_t lewy = (int32_t)(*((char *)(ptr - 1)));
+      lewy = (lewy & 0x00000001);
+      int32_t prawy = przeczytajINT32(ptr + rozm);
+      prawy = (prawy & 0x00000001);
+      if (lewy == 1 && prawy == 1) {
+        dodaj(ptr, rozm);
+      } else if (lewy == 1 && prawy == 0) {
+        int32_t rozmp = przeczytajINT32(ptr + rozm);
+        void *popr = (void *)(intptr_t)(przeczytajINT32(ptr + rozm + 4));
+        void *nast = (void *)(intptr_t)(przeczytajINT32(ptr + rozm + 8));
+        usun(popr, nast);
+        rozm += rozmp;
+        dodaj(ptr, rozm);
+      } else if (lewy == 0 && prawy == 1) {
+        int32_t rozml = przeczytajINT32(ptr - 4);
+        void *popr = (void *)(intptr_t)(przeczytajINT32(ptr - rozml + 4));
+        void *nast = (void *)(intptr_t)(przeczytajINT32(ptr - rozml + 8));
+        usun(popr, nast);
+        dodaj(ptr - rozml, rozm + rozml);
+      } else {
+        int32_t rozml = przeczytajINT32(ptr - 4);
+        int32_t rozmp = przeczytajINT32(ptr + rozm);
+        void *poprl = (void *)(intptr_t)(przeczytajINT32(ptr - rozml + 4));
+        void *nastl = (void *)(intptr_t)(przeczytajINT32(ptr - rozml + 8));
+        usun(poprl, nastl);
+        void *poprp = (void *)(intptr_t)(przeczytajINT32(ptr + rozm + 4));
+        void *nastp = (void *)(intptr_t)(przeczytajINT32(ptr + rozm + 8));
+        usun(poprp, nastp);
+        dodaj(ptr - rozml, rozml + rozm + rozmp);
+      }
+    }
+  }
+}
+
+// Realloc is divided into 6 cases:
+// 1. If second argument is equal to 0, execute free.
+// 2. Else if first argument is equal to NULL, execute malloc.
+// 3. Else if block size decreases by at least minimal size of a free block, add this new free block to its bucket.
+// 4. Else if block size increases and it is at the end of the heap, increase heap size.
+// 5. Else if block size increases and right neighbour is free, try merging with it.
+// 6. Else, execute malloc and copy data into new block.
+void *realloc(void *old_ptr, size_t size) {
+  if (size == 0) {
+    free(old_ptr);
+    return NULL;
+  }
+  if (!old_ptr) {
+    return malloc(size);
+  }
+  old_ptr = old_ptr - 4;
+  int32_t n = size + 5 + (11 - size % 16) % 16;
+  int32_t rozm = przeczytajINT32(old_ptr) - 1;
+  if (n <= rozm) {
+    if (n == 16) {
+      n += 16;
+    }
+    if (rozm - n >= 32) {
+      dodaj(old_ptr + n, rozm - n);
+      ustaw_pelny(old_ptr, n);
+      return old_ptr + 4;
+    }
+    return old_ptr + 4;
+  }
+  if ((old_ptr + rozm - 1) == mem_heap_hi()) {
+    mem_sbrk((long)(n - rozm));
+    ustaw_pelny(old_ptr, n);
+    return old_ptr + 4;
+  }
+  int32_t prawy = przeczytajINT32(old_ptr + rozm);
+  prawy = (prawy & 0x00000001);
+  int32_t rozmp = przeczytajINT32(old_ptr + rozm);
+  if (prawy == 0 && rozmp + rozm >= n) {
+    if (rozmp + rozm - n >= 32) {
+      usun((void *)(intptr_t)(przeczytajINT32(old_ptr + rozm + 4)),
+           (void *)(intptr_t)(przeczytajINT32(old_ptr + rozm + 8)));
+      dodaj(old_ptr + n, rozm + rozmp - n);
+      ustaw_pelny(old_ptr, n);
+      return old_ptr + 4;
+    }
+    if (rozmp + rozm - n == 16) {
+      n += 16;
+    }
+    usun((void *)(intptr_t)(przeczytajINT32(old_ptr + rozm + 4)),
+         (void *)(intptr_t)(przeczytajINT32(old_ptr + rozm + 8)));
+    ustaw_pelny(old_ptr, n);
+    return old_ptr + 4;
+  }
+  void *new_ptr = malloc(size);
+  size_t old_size;
+  if (n <= rozm) {
+    old_size = n;
+  } else {
+    old_size = rozm;
+  }
+  memcpy(new_ptr, old_ptr + 4, old_size - 5);
+  free(old_ptr + 4);
+  return new_ptr;
+}
