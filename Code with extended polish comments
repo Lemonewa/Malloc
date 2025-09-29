@@ -19,6 +19,13 @@
 // czyli z tego 24 + zawartosc wlasciwa zostanie nam realnie zawartosc wlasciwa
 // + 19 do przydzielenia
 
+// korzystam z nastepujacych blackboxow:
+// mem_heapsize(void) zwraca rozmiar sterty w bajtach
+// *mem_heap_lo(void) zwraca adres pierwszego bajtu należącego do sterty
+// *mem_heap_hi(void) zwraca adres ostatniego bajtu należącego do sterty
+// *mem_sbrk(long incr) zwieksza sterte o incr bajtow i zwraca wskaznik na
+// poczatek nowego obszaru
+
 static const int64_t sz = 0x800000000;
 
 // ponizej znajduja sie funkcje do oblsugi wskaznikow
@@ -29,14 +36,12 @@ static inline void wczytajINT32(void *adres, int32_t wartosc) {
   int32_t *temp = adres;
   *temp = wartosc;
 }
-
 // funkcja do wczytywania int32_t pod dany wskaznik, ale przyjmuje argument
 // int64_t
 static inline void wczytajINT64(void *adres, int64_t wartosc) {
   int32_t *temp = adres;
   *temp = wartosc & 0xffffffff;
 }
-
 // funkcja do odczytywania int32_t z danego wskaznika
 static inline int32_t przeczytajINT32(void *adres) {
   int32_t temp = *((int32_t *)(adres));
@@ -110,7 +115,6 @@ static inline void ustaw_pusty(void *adres, int32_t rozmiar, void *poprzednik,
   wczytajINT64(adres + 8, (int64_t)(nastepnik));
   wczytajINT32(adres + rozmiar - 4, rozmiar);
 }
-
 // funkcja ustawia metadane pelnego bloku w pamieci
 static inline void ustaw_pelny(void *adres, int32_t rozmiar) {
   wczytajINT32(adres, rozmiar + 1);
@@ -242,13 +246,6 @@ static inline void dodaj(void *gdzie, int32_t rozmiar) {
     }
   }
 }*/
-
-// przyda sie:
-// mem_heapsize(void) zwraca rozmiar sterty w bajtach
-// *mem_heap_lo(void) zwraca adres pierwszego bajtu należącego do sterty
-// *mem_heap_hi(void) zwraca adres ostatniego bajtu należącego do sterty
-// *mem_sbrk(long incr) zwieksza sterte o incr bajtow i zwraca wskaznik na
-// poczatek nowego obszaru
 
 // init jedynie inicjuje odpowiednio moje 11 kubelkow oraz kolejne 4B
 int mm_init(void) {
